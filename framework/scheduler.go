@@ -2,6 +2,8 @@ package framework
 
 import (
 	"log"
+	"math/rand"
+	"strconv"
 	"strings"
 
 	"github.com/mesos/mesos-go/api/v1/lib/scheduler"
@@ -13,6 +15,40 @@ type Scheduler struct {
 	Framework *Framework
 	isRunning bool
 	Count     int
+	Cluster   *Cluster
+}
+
+func (sch *Scheduler) createContainer(image string) (containerInfo *mesos.ContainerInfo) {
+	containerType := mesos.ContainerInfo_DOCKER
+	network := mesos.ContainerInfo_DockerInfo_HOST
+	return &mesos.ContainerInfo{
+		Type: &containerType,
+		Docker: &mesos.ContainerInfo_DockerInfo{
+			Image:   image,
+			Network: &network,
+		},
+	}
+}
+
+func (sch *Scheduler) createExecutor() (executor *mesos.ExecutorInfo) {
+	hasShell := false
+	cmd := "/opt/cke/bin/luzx-executor:0.0.1"
+	image := "reg.mg.hcbss/open/luzx-executor:0.0.1"
+	execId := "Luzx-Exec" + strconv.Itoa(rand.Intn(1000))
+
+	return &mesos.ExecutorInfo{
+		Type: mesos.ExecutorInfo_CUSTOM,
+		ExecutorID: mesos.ExecutorID{
+			Value: execId,
+		},
+		FrameworkID: sch.Framework.FrameworkID,
+		Command: &mesos.CommandInfo{
+			Shell:     &hasShell,
+			Value:     &cmd,
+			Arguments: []string{},
+		},
+		Container: sch.createContainer(image),
+	}
 }
 
 func PrintResource(resource *mesos.Resource) {
@@ -57,39 +93,87 @@ func PrintOffer(offer *mesos.Offer) {
 // 	return
 // }
 
-func (sch *Scheduler) processOffer(offer mesos.Offer) (oper mesos.Offer_Operation, err error) {
+func (sch *Scheduler) processOffer(offer mesos.Offer) (oper *mesos.Offer_Operation) {
 
 	cpuNum := 1.0
 	memNum := 256.0
-	offerCpu := 0.0
-	offerMem := 0.0
-	for _, resource := range offer.Resources {
-		if strings.Compare(resource.Name, "mem") == 0 {
-			offerMem += resource.Scalar.Value
+	var task *TaskInfo
+	tasks := sch.Cluster.GetInconsistentTasks()
+	for _, t := range tasks {
+		offerCpu := 0.0
+		offerMem := 0.0
+		for _, resource := range offer.Resources {
+			if strings.Compare(resource.Name, "mem") == 0 {
+				offerMem += resource.Scalar.Value
+			}
+			if strings.Compare(resource.Name, "cpus") == 0 {
+				offerCpu += resource.Scalar.Value
+			}
 		}
-		if strings.Compare(resource.Name, "cpus") == 0 {
-			offerCpu += resource.Scalar.Value
+		if offerCpu < cpuNum || offerMem < memNum {
+			return
 		}
+		task = t
+		break
 	}
-	if offerCpu < cpuNum || offerMem < memNum {
-		return nil, nil
+	if task == nil {
+		return
 	}
-	cpuRes := &mesos.Resource{
+
+	cpuRes := mesos.Resource{
 		Name: "cpus",
 		Type: mesos.SCALAR.Enum(),
 		Scalar: &mesos.Value_Scalar{
 			Value: cpuNum,
 		},
 	}
-	memRes := &mesos.Resource{
+	memRes := mesos.Resource{
 		Name: "mem",
 		Type: mesos.SCALAR.Enum(),
 		Scalar: &mesos.Value_Scalar{
 			Value: memNum,
 		},
 	}
-	resource := []mesos.Resource{cpuNum, memRes}
+	resource := []mesos.Resource{cpuRes, memRes}
+	mesosTasks := make([]mesos.TaskInfo, 0, 10)
 	// 创建 executor & task
+	taskID := task.Name + "." + strconv.Itoa(sch.Count)
+	sch.Count++
+	mesosTask := mesos.TaskInfo{
+		Name: task.Name,
+		TaskID: mesos.TaskID{
+			Value: taskID,
+		},
+		AgentID:   offer.AgentID,
+		Resources: resource,
+		Executor:  sch.createExecutor(),
+	}
+	mesosTasks = append(mesosTasks, mesosTask)
+
+	oper = &mesos.Offer_Operation{
+		Type: mesos.Offer_Operation_LAUNCH,
+		Launch: &mesos.Offer_Operation_Launch{
+			TaskInfos: mesosTasks,
+		},
+	}
+	log.Println("start task (" + taskID + ") at " + offer.Hostname + ", executor: + " + mesosTask.Executor.ExecutorID.Value)
+	return
+}
+
+func (sch *Scheduler) processOffers(offers []mesos.Offer) (
+	acceptIds []mesos.OfferID, opers []mesos.Offer_Operation, declineIds []mesos.OfferID) {
+	acceptIds = make([]mesos.OfferID, 0, len(offers))
+	declineIds = make([]mesos.OfferID, 0, len(offers))
+	for _, offer := range offers {
+		oper := sch.processOffer(offer)
+		if oper != nil {
+			acceptIds = append(acceptIds, offer.ID)
+			opers = append(opers, *oper)
+		} else {
+			declineIds = append(declineIds, offer.ID)
+		}
+	}
+	return
 }
 
 func (sch *Scheduler) onDecline(offers []mesos.Offer) (err error) {
@@ -108,21 +192,36 @@ func (sch *Scheduler) onDecline(offers []mesos.Offer) (err error) {
 	return
 }
 
-// func (sch *Scheduler) processOffers(offers []mesos.Offer) (acceptIds []mesos.OfferID,
-// 	opers []mesos.Offer_Operation, declineIds []mesos.OfferID) {
-// 	acceptIds = make([]mesos.OfferID, 0, len(offers))
-// 	opers = make([]mesos.Offer_Operation, 0, len(offers))
-// 	declineIds = make([]mesos.OfferID, 0, len(offers))
-// 	for _, offer := range offers {
-// 		// oper := sch.p/
-// 	}
-// }
+func (sch *Scheduler) onOffers(eventOffers *scheduler.Event_Offers) {
 
-func (sch *Scheduler) onOffers(offers *scheduler.Event_Offers) {
-	for _, offer := range offers.Offers {
-		PrintOffer(&offer)
+	acceptIds, opers, declineIds := sch.processOffers(eventOffers.Offers)
+
+	if len(acceptIds) > 0 && len(opers) > 0 {
+		refuseSeconds := 5.0
+		accept := &scheduler.Call_Accept{
+			OfferIDs:   acceptIds,
+			Operations: opers,
+			Filters: &mesos.Filters{
+				RefuseSeconds: &refuseSeconds,
+			},
+		}
+		err := sch.Framework.CallMaster(accept)
+		if err != nil {
+			log.Println("Call accept :", err)
+		}
 	}
-	sch.onDecline(offers.Offers)
+
+	declineSeconds := 5.0
+	decline := &scheduler.Call_Decline{
+		OfferIDs: declineIds,
+		Filters: &mesos.Filters{
+			RefuseSeconds: &declineSeconds,
+		},
+	}
+	err := sch.Framework.CallMaster(decline)
+	if err != nil {
+		log.Println("Call Decline err:", err)
+	}
 }
 
 func (sch *Scheduler) onHeartBeat() {

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/uuid"
+	"github.com/pborman/uuid"
 
 	executor "github.com/mesos/mesos-go/api/v1/lib/executor"
 
@@ -31,6 +31,56 @@ type ComputeExecutor struct {
 	unackedTasks             map[mesos.TaskID]mesos.TaskInfo
 	unackedUpdates           map[string]executor.Call_Update
 	failedTask               map[mesos.TaskID]mesos.TaskStatus
+}
+
+// NewComputeExecutor contructor
+func NewComputeExecutor() *ComputeExecutor {
+	return &ComputeExecutor{
+		unackedTasks:   make(map[mesos.TaskID]mesos.TaskInfo),
+		unackedUpdates: make(map[string]executor.Call_Update),
+	}
+}
+
+func (fe *ComputeExecutor) Start(url string, frameworkId string, execId string) (err error) {
+	fe.url = url
+	fe.heartbeatIntervalSeconds = 10
+	fe.isRunning = true
+	fe.ExecId = mesos.ExecutorID{
+		Value: execId,
+	}
+	fe.FWId = mesos.FrameworkID{
+		Value: frameworkId,
+	}
+	err = fe.connect()
+	if err != nil {
+		return
+	}
+
+	fe.run()
+
+	return nil
+}
+
+func (fe *ComputeExecutor) run() {
+	reConnected := false
+	for true {
+		err := fe.loopEvents()
+		if err == nil || !fe.isRunning {
+			log.Println("cke executor stopped.")
+			break
+		}
+		log.Println("cke executor http loop error:", err)
+		reConnected = false
+		for !reConnected {
+			err := fe.connect()
+			if err == nil {
+				log.Println("cke executor http connect error:", err)
+				reConnected = true
+			} else {
+				time.Sleep(time.Duration(10) * time.Second)
+			}
+		}
+	}
 }
 
 func (exec *ComputeExecutor) readEventLen() (eventLen int64, err error) {
@@ -145,7 +195,7 @@ func (exec *ComputeExecutor) connect() (err error) {
 		log.Println("Registered executor : ", exec.ExecutorInfo.ExecutorID.Value)
 		break
 	default:
-		err := errors.New("Error get exector error")
+		err = errors.New("Error get exector error")
 		break
 	}
 	return
@@ -211,6 +261,7 @@ func (exec *ComputeExecutor) onLaunch(launch *executor.Event_Launch) {
 	}
 }
 
+// CallAgent call agent
 func (exec *ComputeExecutor) CallAgent(call interface{}) (err error) {
 	calReq := &executor.Call{
 		ExecutorID:  exec.ExecId,
@@ -224,7 +275,6 @@ func (exec *ComputeExecutor) CallAgent(call interface{}) (err error) {
 		break
 	default:
 		return errors.New("unknown call type" + reflect.TypeOf(call).String() + "in call agent ")
-		break
 	}
 	data, err := proto.Marshal(calReq)
 	if err != nil {

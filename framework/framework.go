@@ -18,7 +18,7 @@ import (
 	mesos "github.com/mesos/mesos-go/api/v1/lib"
 )
 
-// framework constructor for framework.
+// Framework constructor for framework.
 type Framework struct {
 	Role                     *string
 	Name                     string
@@ -214,6 +214,10 @@ func (fw *Framework) CallMaster(call interface{}) (err error) {
 	case scheduler.Call_Decline:
 		callReq.Type = scheduler.Call_DECLINE
 		callReq.Decline = call.(*scheduler.Call_Decline)
+		break
+	case scheduler.Call_Accept:
+		callReq.Type = scheduler.Call_DECLINE
+		callReq.Accept = call.(*scheduler.Call_Accept)
 		break
 	default:
 		return errors.New("Unknown type " + reflect.TypeOf(call).String() + " in call master")
